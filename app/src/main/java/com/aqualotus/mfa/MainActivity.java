@@ -24,8 +24,14 @@ public class MainActivity extends Activity {
     private final Handler clock = new Handler(Looper.getMainLooper());
     private JSONArray entries = new JSONArray();
     private final List<TextView> codes = new ArrayList<>();
+    private final List<ProgressBar> timers = new ArrayList<>();
     private LinearLayout list;
     private boolean vaultReady;
+    private Pro billing;
+    private boolean proActive;
+    private boolean entitlementKnown;
+    private Ads ads;
+    private AlertDialog infoDialog;
     private DecoratedBarcodeView scanner;
     private static final int CAMERA_REQUEST = 21;
     private static final int IMAGE_REQUEST = 22;
@@ -39,9 +45,24 @@ public class MainActivity extends Activity {
         try { load(); vaultReady = true; }
         catch (Exception e) { toast("Could not open your vault"); }
         render();
+        ads = new Ads(this, () -> entitlementKnown && !proActive);
+        billing = new Pro(this, active -> {
+            entitlementKnown = true;
+            if (!active) ads.start();
+            if (proActive == active) return;
+            proActive = active;
+            if (active && infoDialog != null) infoDialog.dismiss();
+            if (scanner == null) render();
+        });
     }
 
-    @Override protected void onResume() { super.onResume(); if (scanner != null) scanner.resume(); clock.post(tick); }
+    @Override protected void onDestroy() {
+        if (infoDialog != null) infoDialog.dismiss();
+        if (billing != null) billing.close();
+        super.onDestroy();
+    }
+
+    @Override protected void onResume() { super.onResume(); if (billing != null) billing.refresh(); if (scanner != null) scanner.resume(); clock.post(tick); }
     @Override protected void onPause() { clock.removeCallbacks(tick); if (scanner != null) scanner.pause(); super.onPause(); }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
@@ -53,7 +74,7 @@ public class MainActivity extends Activity {
     private void button(String text, Runnable action) {
         Button view = new Button(this);
         view.setText(text); view.setAllCaps(false); view.setOnClickListener(v -> action.run());
-        boolean primary = text.contains("Scan QR code");
+        boolean primary = text.equals("+ Add account");
         GradientDrawable surface = new GradientDrawable();
         surface.setCornerRadius(dp(18));
         surface.setColor(primary ? 0xff0c5145 : 0xffe2eee8);
@@ -88,22 +109,27 @@ public class MainActivity extends Activity {
         setContentView(scroll);
         TextView eyebrow = label("MFA  •  ON THIS DEVICE", 12);
         eyebrow.setLetterSpacing(.13f);
-        list.addView(eyebrow);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(dp(22), dp(22), dp(22), dp(22));
+        header.setBackground(panel(0xff123e37, 28));
+        list.addView(header);
+        eyebrow.setTextColor(0xffa8e6c8);
+        header.addView(eyebrow);
         TextView title = label("Your codes", 38);
         title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        list.addView(title);
-        list.addView(label(entries.length() + " / 3 accounts", 15));
+        title.setTextColor(Color.WHITE);
+        title.setPadding(0, dp(8), 0, dp(6));
+        header.addView(title);
+        TextView count = label(proActive ? entries.length() + " accounts · Pro" : entries.length() + " of 3 accounts", 15);
+        count.setTextColor(0xffc4e5d5);
+        header.addView(count);
         codes.clear();
+        timers.clear();
         if (!vaultReady) {
             list.addView(label("Vault unavailable. Your saved data is still on this device.", 16));
             return;
         }
-        button("＋  Scan QR code", this::requestScanner);
-        button("Choose QR image", this::chooseQrImage);
-        button("Enter setup key", this::manual);
-        button("Switching authenticators?", () -> new AlertDialog.Builder(this).setTitle("Switch accounts")
-            .setMessage("Add an account using its setup QR or key. Sign in with a code from this app. After a successful sign-in, hold the account card and mark it verified. Keep your old authenticator until all accounts work.")
-            .setPositiveButton("Done", null).show());
         if (entries.length() == 0) {
             TextView empty = label("Add your first account\nUse the setup QR code from the service you want to protect.", 17);
             empty.setPadding(0, dp(24), 0, dp(16));
@@ -124,16 +150,89 @@ public class MainActivity extends Activity {
             card.addView(label(item.optString("name") + (item.optBoolean("verified") ? "  ✓" : ""), 17));
             TextView code = label("", 32);
             code.setTypeface(Typeface.MONOSPACE);
-            card.addView(code); codes.add(code);
+            card.addView(code);
+            codes.add(code);
+            ProgressBar timer = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+            timer.setProgressTintList(android.content.res.ColorStateList.valueOf(0xff25765e));
+            timer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+            card.addView(timer, new LinearLayout.LayoutParams(-1, dp(8)));
+            timers.add(timer);
+            TextView copyHint = label("Tap to copy", 13);
+            copyHint.setTextColor(0xff295c50);
+            copyHint.setPadding(0, dp(5), 0, 0);
+            card.addView(copyHint);
             card.setOnClickListener(v -> copy(item));
             card.setOnLongClickListener(v -> { manage(index); return true; });
         }
+        button("+ Add account", this::showAddOptions);
+        if (!proActive) {
+            button("Explore MFA Pro", this::upgrade);
+            button("Restore purchases", () -> { if (billing != null) billing.refresh(); });
+        }
+        button("Switching authenticators?", () -> showInfo(true));
+        button("Help & privacy", () -> showInfo(false));
         refresh();
     }
 
+    private void showInfo(boolean transfer) {
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setGravity(Gravity.CENTER_HORIZONTAL);
+        body.setPadding(dp(18), dp(8), dp(18), dp(16));
+        String message = transfer
+            ? "1. Add an account using a setup QR or key.\n\n2. Sign in with a code from this app.\n\n3. Hold the account card and mark it verified. Keep your old authenticator until every account works."
+            : "Tap a card to copy a code. Hold it to manage the account.";
+        body.addView(label(message, 16));
+        com.google.android.gms.ads.AdView banner = ads.banner(body, transfer);
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+            .setTitle(transfer ? "Switch accounts" : "Help & privacy")
+            .setView(body).setPositiveButton("Done", (current, choice) -> {
+                if (transfer) ads.guideFinished();
+            });
+        if (!transfer) {
+            dialog.setNeutralButton("Ad privacy choices", (current, choice) -> ads.privacyOptions())
+                .setNegativeButton("Privacy policy", (current, choice) ->
+                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(
+                        "https://mfa-authenticator-privacy.ghjjjje.chatgpt.site"))));
+        }
+        infoDialog = dialog.create();
+        infoDialog.setOnDismissListener(ignored -> {
+            if (banner != null) banner.destroy();
+            infoDialog = null;
+        });
+        infoDialog.show();
+        if (transfer) ads.preload();
+    }
+
+    private GradientDrawable panel(int color, int radius) {
+        GradientDrawable surface = new GradientDrawable();
+        surface.setColor(color);
+        surface.setCornerRadius(dp(radius));
+        return surface;
+    }
+
+    private void showAddOptions() {
+        if (!canAdd()) return;
+        String[] options = {"Scan with camera", "Choose QR image", "Enter setup key"};
+        new AlertDialog.Builder(this).setTitle("Add an account")
+            .setItems(options, (dialog, selected) -> {
+                switch (selected) {
+                    case 0: requestScanner(); break;
+                    case 1: chooseQrImage(); break;
+                    case 2: manual(); break;
+                }
+            }).setNegativeButton("Cancel", null).show();
+    }
+
+    private void upgrade() {
+        if (billing != null) billing.buy(this::toast);
+    }
+
     private boolean canAdd() {
-        if (entries.length() < 3) return true;
-        toast("The free plan supports up to three accounts.");
+        if (proActive || entries.length() < 3) return true;
+        new AlertDialog.Builder(this).setTitle("Three accounts added")
+            .setMessage("MFA Pro lets you add unlimited accounts. Your existing codes remain available.")
+            .setNegativeButton("Cancel", null).setPositiveButton("View Pro", (dialog, which) -> upgrade()).show();
         return false;
     }
 
@@ -322,7 +421,13 @@ public class MainActivity extends Activity {
             try {
                 JSONObject item = entries.getJSONObject(i);
                 int period = item.getInt("period");
-                codes.get(i).setText(current(item, now) + "   ·   " + (period - now % period) + "s");
+                int remaining = period - (int) (now % period);
+                String code = current(item, now);
+                int midpoint = code.length() / 2;
+                String formatted = code.substring(0, midpoint) + " " + code.substring(midpoint);
+                codes.get(i).setText(formatted + "  ·  " + remaining + "s");
+                timers.get(i).setMax(period);
+                timers.get(i).setProgress(remaining);
             } catch (Exception e) { codes.get(i).setText("Code unavailable"); }
         }
     }

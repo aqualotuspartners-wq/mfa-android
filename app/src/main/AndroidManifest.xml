@@ -1,8 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
-    <application android:label="MFA Authenticator" android:allowBackup="false"
+    <application android:icon="@drawable/mfa_icon" android:label="MFA Authenticator" android:allowBackup="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <meta-data android:name="com.google.android.gms.ads.APPLICATION_ID" android:value="ca-app-pub-3956817331315524~5379266753"/>
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter><action android:name="android.intent.action.MAIN"/>
             <category android:name="android.intent.category.LAUNCHER"/></intent-filter>
