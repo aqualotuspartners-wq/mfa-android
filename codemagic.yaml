@@ -1,0 +1,20 @@
+workflows:
+  mfa-android-build:
+    name: MFA Android Build Check
+    instance_type: linux_x2
+    environment:
+      java: 17
+    scripts:
+      - name: Build APK and AAB
+        script: |
+          set -euo pipefail
+          test -f settings.gradle || {
+            echo "Upload the extracted project files to the repository root."
+            exit 1
+          }
+          sdkmanager "platforms;android-36"
+          gradle wrapper --gradle-version 8.11.1
+          ./gradlew :app:assembleDebug :app:bundleRelease
+    artifacts:
+      - app/build/outputs/apk/debug/*.apk
+      - app/build/outputs/bundle/release/*.aab
