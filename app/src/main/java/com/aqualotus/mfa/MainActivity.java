@@ -11,7 +11,9 @@ import android.security.keystore.*;
 import android.util.Base64;
 import android.view.*;
 import android.widget.*;
-import com.google.zxing.integration.android.IntentIntegrator;
+import com.google.zxing.BarcodeFormat;
+import com.journeyapps.barcodescanner.DecoratedBarcodeView;
+import com.journeyapps.barcodescanner.DefaultDecoderFactory;
 import org.json.*;
 import javax.crypto.*;
 import javax.crypto.spec.GCMParameterSpec;
@@ -24,6 +26,9 @@ public class MainActivity extends Activity {
     private final List<TextView> codes = new ArrayList<>();
     private LinearLayout list;
     private boolean vaultReady;
+    private DecoratedBarcodeView scanner;
+    private static final int CAMERA_REQUEST = 21;
+    private static final int IMAGE_REQUEST = 22;
     private final Runnable tick = new Runnable() {
         public void run() { refresh(); clock.postDelayed(this, 250); }
     };
@@ -36,8 +41,8 @@ public class MainActivity extends Activity {
         render();
     }
 
-    @Override protected void onResume() { super.onResume(); clock.post(tick); }
-    @Override protected void onPause() { clock.removeCallbacks(tick); super.onPause(); }
+    @Override protected void onResume() { super.onResume(); if (scanner != null) scanner.resume(); clock.post(tick); }
+    @Override protected void onPause() { clock.removeCallbacks(tick); if (scanner != null) scanner.pause(); super.onPause(); }
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
     private TextView label(String text, int size) {
@@ -48,31 +53,62 @@ public class MainActivity extends Activity {
     private void button(String text, Runnable action) {
         Button view = new Button(this);
         view.setText(text); view.setAllCaps(false); view.setOnClickListener(v -> action.run());
-        list.addView(view);
+        boolean primary = text.contains("Scan QR code");
+        GradientDrawable surface = new GradientDrawable();
+        surface.setCornerRadius(dp(18));
+        surface.setColor(primary ? 0xff0c5145 : 0xffe2eee8);
+        view.setBackground(new android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(0x22459879), surface, null));
+        view.setTextColor(primary ? Color.WHITE : 0xff174b42);
+        LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(-1, dp(52));
+        row.topMargin = dp(10);
+        list.addView(view, row);
     }
+
+    private void applyInsets(View view) {
+        view.setOnApplyWindowInsetsListener((v, insets) -> {
+            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            return insets;
+        });
+    }
+
     private void render() {
+        if (scanner != null) {
+            scanner.pause();
+            scanner = null;
+        }
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(0xfff0f6f4);
+        scroll.setBackgroundColor(0xfff3f8f5);
         list = new LinearLayout(this);
         list.setOrientation(1);
-        list.setPadding(dp(24), dp(64), dp(24), dp(40));
+        list.setPadding(dp(24), dp(28), dp(24), dp(24));
+        applyInsets(scroll);
         scroll.addView(list);
         setContentView(scroll);
-        list.addView(label("Authenticator", 32));
-        list.addView(label("Your verification codes", 16));
+        TextView eyebrow = label("MFA  •  ON THIS DEVICE", 12);
+        eyebrow.setLetterSpacing(.13f);
+        list.addView(eyebrow);
+        TextView title = label("Your codes", 38);
+        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        list.addView(title);
+        list.addView(label(entries.length() + " / 3 accounts", 15));
         codes.clear();
         if (!vaultReady) {
             list.addView(label("Vault unavailable. Your saved data is still on this device.", 16));
             return;
         }
-        button("Scan QR code", () -> {
-            if (canAdd()) new IntentIntegrator(this).setDesiredBarcodeFormats(IntentIntegrator.QR_CODE)
-                .setPrompt("Scan a 2FA setup QR code").setBeepEnabled(false).initiateScan();
-        });
+        button("＋  Scan QR code", this::requestScanner);
+        button("Choose QR image", this::chooseQrImage);
         button("Enter setup key", this::manual);
         button("Switching authenticators?", () -> new AlertDialog.Builder(this).setTitle("Switch accounts")
             .setMessage("Add an account using its setup QR or key. Sign in with a code from this app. After a successful sign-in, hold the account card and mark it verified. Keep your old authenticator until all accounts work.")
             .setPositiveButton("Done", null).show());
+        if (entries.length() == 0) {
+            TextView empty = label("Add your first account\nUse the setup QR code from the service you want to protect.", 17);
+            empty.setPadding(0, dp(24), 0, dp(16));
+            list.addView(empty);
+        }
         for (int i = 0; i < entries.length(); i++) {
             final int index = i;
             JSONObject item = entries.optJSONObject(i);
@@ -86,7 +122,7 @@ public class MainActivity extends Activity {
             params.topMargin = dp(12);
             list.addView(card, params);
             card.addView(label(item.optString("name") + (item.optBoolean("verified") ? "  ✓" : ""), 17));
-            TextView code = label("", 27);
+            TextView code = label("", 32);
             code.setTypeface(Typeface.MONOSPACE);
             card.addView(code); codes.add(code);
             card.setOnClickListener(v -> copy(item));
@@ -112,12 +148,129 @@ public class MainActivity extends Activity {
                 add(name.getText().toString(), key.getText().toString(), "SHA1", 30, 6)).show();
     }
 
+    private void requestScanner() {
+        if (!canAdd()) return;
+        if (checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            showScanner();
+        } else {
+            requestPermissions(new String[]{android.Manifest.permission.CAMERA}, CAMERA_REQUEST);
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request != CAMERA_REQUEST) return;
+        if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) showScanner();
+        else toast("Camera access is required to scan. You can enter a setup key instead.");
+    }
+
+    private void showScanner() {
+        LinearLayout cameraPage = new LinearLayout(this);
+        cameraPage.setOrientation(LinearLayout.VERTICAL);
+        cameraPage.setBackgroundColor(0xfff3f8f5);
+        applyInsets(cameraPage);
+        list = cameraPage;
+        button("‹  Back to codes", this::render);
+        TextView instruction = label("Point your camera at a 2FA setup QR code", 17);
+        instruction.setPadding(dp(20), dp(14), dp(20), dp(14));
+        cameraPage.addView(instruction);
+        scanner = new DecoratedBarcodeView(this);
+        scanner.getBarcodeView().setDecoderFactory(
+            new DefaultDecoderFactory(Collections.singletonList(BarcodeFormat.QR_CODE)));
+        cameraPage.addView(scanner, new LinearLayout.LayoutParams(-1, 0, 1));
+        button("Enter setup key instead", () -> { render(); manual(); });
+        setContentView(cameraPage);
+        scanner.getBarcodeView().addStateListener(new com.journeyapps.barcodescanner.CameraPreview.StateListener() {
+            public void previewSized() {}
+            public void previewStarted() {}
+            public void previewStopped() {}
+            public void cameraClosed() {}
+            public void cameraError(Exception error) {
+                if (scanner == null) return;
+                render();
+                toast("Camera unavailable. Enter the setup key instead.");
+            }
+        });
+        scanner.decodeSingle(result -> {
+            if (scanner == null) return;
+            render();
+            addFromQr(result.getText());
+        });
+        scanner.resume();
+    }
+
+    @Override public void onBackPressed() {
+        if (scanner != null) render();
+        else super.onBackPressed();
+    }
+
+    private void chooseQrImage() {
+        if (!canAdd()) return;
+        Intent picker = new Intent(Intent.ACTION_GET_CONTENT);
+        picker.setType("image/*");
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        try {
+            startActivityForResult(picker, IMAGE_REQUEST);
+        } catch (ActivityNotFoundException exception) {
+            toast("No image picker is available.");
+        }
+    }
+
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        com.google.zxing.integration.android.IntentResult scan = IntentIntegrator.parseActivityResult(request, result, data);
-        if (scan == null || scan.getContents() == null || !vaultReady) return;
+        if (request != IMAGE_REQUEST || result != RESULT_OK || data == null
+            || data.getData() == null || !vaultReady) return;
+        Uri image = data.getData();
+        new Thread(() -> {
+            try {
+                String value = readQrImage(image);
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) addFromQr(value);
+                });
+            } catch (Exception exception) {
+                runOnUiThread(() -> {
+                    if (!isFinishing() && !isDestroyed()) {
+                        toast("No readable QR code. Try a clear screenshot or enter the setup key.");
+                    }
+                });
+            }
+        }, "mfa-image-decoder").start();
+    }
+
+    private String readQrImage(Uri image) throws Exception {
+        android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        try (java.io.InputStream stream = getContentResolver().openInputStream(image)) {
+            android.graphics.BitmapFactory.decodeStream(stream, null, options);
+        }
+        if (options.outWidth < 1 || options.outHeight < 1) throw new IllegalArgumentException();
+        options.inSampleSize = 1;
+        int largestSide = Math.max(options.outWidth, options.outHeight);
+        while (largestSide / options.inSampleSize > 2048) options.inSampleSize *= 2;
+        options.inJustDecodeBounds = false;
+        try (java.io.InputStream stream = getContentResolver().openInputStream(image)) {
+            android.graphics.Bitmap bitmap = android.graphics.BitmapFactory.decodeStream(stream, null, options);
+            if (bitmap == null) throw new IllegalArgumentException();
+            try {
+                int width = bitmap.getWidth();
+                int height = bitmap.getHeight();
+                int[] pixels = new int[width * height];
+                bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+                com.google.zxing.LuminanceSource source =
+                    new com.google.zxing.RGBLuminanceSource(width, height, pixels);
+                com.google.zxing.BinaryBitmap binary = new com.google.zxing.BinaryBitmap(
+                    new com.google.zxing.common.HybridBinarizer(source));
+                return new com.google.zxing.qrcode.QRCodeReader().decode(binary,
+                    Collections.singletonMap(com.google.zxing.DecodeHintType.TRY_HARDER, Boolean.TRUE)).getText();
+            } finally {
+                bitmap.recycle();
+            }
+        }
+    }
+
+    private void addFromQr(String value) {
         try {
-            Uri uri = Uri.parse(scan.getContents());
+            Uri uri = Uri.parse(value);
             if (!"otpauth".equals(uri.getScheme()) || !"totp".equals(uri.getHost())) throw new IllegalArgumentException();
             String label = uri.getLastPathSegment();
             add(label == null ? "" : label, uri.getQueryParameter("secret"),
