@@ -11,6 +11,7 @@ import android.security.keystore.*;
 import android.util.Base64;
 import android.view.*;
 import android.widget.*;
+import com.google.android.gms.ads.AdView;
 import com.google.zxing.BarcodeFormat;
 import com.journeyapps.barcodescanner.DecoratedBarcodeView;
 import com.journeyapps.barcodescanner.DefaultDecoderFactory;
@@ -71,19 +72,22 @@ public class MainActivity extends Activity {
         view.setText(text); view.setTextSize(size); view.setTextColor(0xff233348);
         return view;
     }
-    private void button(String text, Runnable action) {
+    private Button actionButton(String text, boolean primary, Runnable action) {
         Button view = new Button(this);
         view.setText(text); view.setAllCaps(false); view.setOnClickListener(v -> action.run());
-        boolean primary = text.equals("+ Add account");
         GradientDrawable surface = new GradientDrawable();
         surface.setCornerRadius(dp(18));
         surface.setColor(primary ? 0xff0c5145 : 0xffe2eee8);
         view.setBackground(new android.graphics.drawable.RippleDrawable(
             android.content.res.ColorStateList.valueOf(0x22459879), surface, null));
         view.setTextColor(primary ? Color.WHITE : 0xff174b42);
+        return view;
+    }
+
+    private void button(String text, Runnable action) {
         LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(-1, dp(52));
         row.topMargin = dp(10);
-        list.addView(view, row);
+        list.addView(actionButton(text, text.equals("+ Add account"), action), row);
     }
 
     private void applyInsets(View view) {
@@ -183,12 +187,18 @@ public class MainActivity extends Activity {
             ? "1. Add an account using a setup QR or key.\n\n2. Sign in with a code from this app.\n\n3. Hold the account card and mark it verified. Keep your old authenticator until every account works."
             : "Tap a card to copy a code. Hold it to manage the account.";
         body.addView(label(message, 16));
-        com.google.android.gms.ads.AdView banner = ads.banner(body, transfer);
+        final LinearLayout offer;
+        if (transfer) {
+            offer = new LinearLayout(this);
+            offer.setOrientation(LinearLayout.VERTICAL);
+            body.addView(offer, new LinearLayout.LayoutParams(-1, -2));
+        } else {
+            offer = null;
+        }
+        final AdView[] banner = new AdView[]{ads.banner(body, transfer)};
         AlertDialog.Builder dialog = new AlertDialog.Builder(this)
             .setTitle(transfer ? "Switch accounts" : "Help & privacy")
-            .setView(body).setPositiveButton("Done", (current, choice) -> {
-                if (transfer) ads.guideFinished();
-            });
+            .setView(body).setPositiveButton("Done", null);
         if (!transfer) {
             dialog.setNeutralButton("Ad privacy choices", (current, choice) -> ads.privacyOptions())
                 .setNegativeButton("Privacy policy", (current, choice) ->
@@ -197,11 +207,54 @@ public class MainActivity extends Activity {
         }
         infoDialog = dialog.create();
         infoDialog.setOnDismissListener(ignored -> {
-            if (banner != null) banner.destroy();
+            ads.setRewardReadyListener(null);
+            if (banner[0] != null) {
+                banner[0].destroy();
+                banner[0] = null;
+            }
             infoDialog = null;
         });
         infoDialog.show();
-        if (transfer) ads.preload();
+        if (transfer) {
+            Runnable present = () -> presentRewardOffer(offer, body, banner);
+            ads.setRewardReadyListener(present);
+            present.run();
+            ads.preload();
+        }
+    }
+
+    private void presentRewardOffer(LinearLayout offer, LinearLayout body, AdView[] banner) {
+        if (isFinishing() || isDestroyed() || infoDialog == null || !infoDialog.isShowing()) return;
+        if (offer == null || !ads.rewardReady() || offer.findViewWithTag("reward-offer") != null) return;
+        TextView note = label("Optional: watch a short ad to support this free app. Banners stay hidden for the rest of this session.", 15);
+        note.setTag("reward-offer");
+        LinearLayout.LayoutParams noteRow = new LinearLayout.LayoutParams(-1, -2);
+        noteRow.topMargin = dp(16);
+        offer.addView(note, noteRow);
+        Button watch = actionButton("Watch a short ad", false, () -> {
+            if (!ads.showRewarded(() -> grantBannerBreak(offer, body, banner))) return;
+            if (offer.findViewWithTag("reward-offer") != null) offer.removeAllViews();
+        });
+        watch.setTag("reward-offer");
+        watch.setContentDescription("Watch a short ad. Optional support for this free app. Banners stay hidden for the rest of this session.");
+        LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(-1, dp(52));
+        row.topMargin = dp(10);
+        offer.addView(watch, row);
+    }
+
+    private void grantBannerBreak(LinearLayout offer, LinearLayout body, AdView[] banner) {
+        ads.setRewardReadyListener(null);
+        if (infoDialog == null || !infoDialog.isShowing() || offer.findViewWithTag("reward-thanks") != null) return;
+        offer.removeAllViews();
+        TextView thanks = label("Thank you. Banners are hidden for this session.", 15);
+        thanks.setTag("reward-thanks");
+        LinearLayout.LayoutParams row = new LinearLayout.LayoutParams(-1, -2);
+        row.topMargin = dp(16);
+        offer.addView(thanks, row);
+        if (banner[0] == null) return;
+        body.removeView(banner[0]);
+        banner[0].destroy();
+        banner[0] = null;
     }
 
     private GradientDrawable panel(int color, int radius) {

@@ -2,11 +2,10 @@ package com.aqualotus.mfa;
 
 import android.app.Activity;
 import android.content.pm.ApplicationInfo;
-import android.os.SystemClock;
 import android.widget.LinearLayout;
 import com.google.android.gms.ads.*;
-import com.google.android.gms.ads.interstitial.InterstitialAd;
-import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
+import com.google.android.gms.ads.rewarded.RewardedAd;
+import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
 import com.google.android.ump.*;
 import java.util.function.BooleanSupplier;
 
@@ -18,9 +17,10 @@ final class Ads {
     private boolean started;
     private boolean ready;
     private boolean loading;
-    private long lastShown = -180000;
-    private int guideVisits;
-    private InterstitialAd interstitial;
+    /** Earned by opting in on the guide dialog. Lasts until the process ends. */
+    private static boolean bannersHidden;
+    private RewardedAd rewarded;
+    private Runnable rewardReadyListener;
 
     Ads(Activity activity, BooleanSupplier free) {
         this.activity = activity;
@@ -51,43 +51,51 @@ final class Ads {
     }
 
     AdView banner(LinearLayout container, boolean transfer) {
-        if (!ready || !allowed()) return null;
+        if (bannersHidden || !ready || !allowed()) return null;
         AdView view = new AdView(activity);
         view.setAdSize(AdSize.BANNER);
         view.setAdUnitId(debug ? "ca-app-pub-3940256099942544/6300978111" : transfer
-            ? "ca-app-pub-3956817331315524/9651673359" : "ca-app-pub-3956817331315524/3217951932");
+            ? "ca-app-pub-3956817331315524/4759993650" : "ca-app-pub-3956817331315524/4979485509");
         container.addView(view, new LinearLayout.LayoutParams(-2, -2));
         view.loadAd(new AdRequest.Builder().build());
         return view;
     }
 
+    boolean rewardReady() { return !bannersHidden && rewarded != null && allowed(); }
+
+    void setRewardReadyListener(Runnable listener) { rewardReadyListener = listener; }
+
     void preload() {
-        if (!ready || !allowed() || loading || interstitial != null) return;
+        if (bannersHidden || !ready || !allowed() || loading || rewarded != null) return;
         loading = true;
-        InterstitialAd.load(activity, debug ? "ca-app-pub-3940256099942544/1033173712"
-            : "ca-app-pub-3956817331315524/5712428344",
-            new AdRequest.Builder().build(), new InterstitialAdLoadCallback() {
-                public void onAdLoaded(InterstitialAd ad) {
+        RewardedAd.load(activity, debug ? "ca-app-pub-3940256099942544/5224354917"
+            : "ca-app-pub-3956817331315524/8707103839",
+            new AdRequest.Builder().build(), new RewardedAdLoadCallback() {
+                public void onAdLoaded(RewardedAd ad) {
                     loading = false;
-                    if (allowed()) interstitial = ad;
+                    if (!allowed() || bannersHidden) return;
+                    rewarded = ad;
+                    Runnable listener = rewardReadyListener;
+                    if (listener != null) listener.run();
                 }
                 public void onAdFailedToLoad(LoadAdError error) { loading = false; }
             });
     }
 
-    void guideFinished() {
-        if (!allowed() || ++guideVisits < 2) return;
-        long now = SystemClock.elapsedRealtime();
-        if (interstitial == null || now - lastShown < 180000) return;
-        InterstitialAd ad = interstitial;
-        interstitial = null;
-        lastShown = now;
-        guideVisits = 0;
+    // Opt-in only. Never call this from a timer, dismiss listener, or load callback.
+    boolean showRewarded(Runnable onEarned) {
+        if (!rewardReady()) return false;
+        RewardedAd ad = rewarded;
+        rewarded = null;
         ad.setFullScreenContentCallback(new FullScreenContentCallback() {
             public void onAdDismissedFullScreenContent() { preload(); }
             public void onAdFailedToShowFullScreenContent(AdError error) { preload(); }
         });
-        ad.show(activity);
+        ad.show(activity, reward -> {
+            bannersHidden = true;
+            if (onEarned != null) onEarned.run();
+        });
+        return true;
     }
 
     void privacyOptions() {
