@@ -47,9 +47,10 @@ public class MainActivity extends Activity {
         catch (Exception e) { toast("Could not open your vault"); }
         render();
         ads = new Ads(this, () -> entitlementKnown && !proActive);
+        ads.start();
         billing = new Pro(this, active -> {
             entitlementKnown = true;
-            if (!active) ads.start();
+            if (!active) ads.loadIfAllowed();
             if (proActive == active) return;
             proActive = active;
             if (active && infoDialog != null) infoDialog.dismiss();
@@ -200,10 +201,12 @@ public class MainActivity extends Activity {
             .setTitle(transfer ? "Switch accounts" : "Help & privacy")
             .setView(body).setPositiveButton("Done", null);
         if (!transfer) {
-            dialog.setNeutralButton("Ad privacy choices", (current, choice) -> ads.privacyOptions())
-                .setNegativeButton("Privacy policy", (current, choice) ->
-                    startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(
-                        "https://mfa-authenticator-privacy.ghjjjje.chatgpt.site"))));
+            if (ads.privacyOptionsRequired()) {
+                dialog.setNeutralButton("Privacy options", (current, choice) -> ads.privacyOptions());
+            }
+            dialog.setNegativeButton("Privacy policy", (current, choice) ->
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(
+                    "https://mfa-authenticator-privacy.ghjjjje.chatgpt.site"))));
         }
         infoDialog = dialog.create();
         infoDialog.setOnDismissListener(ignored -> {

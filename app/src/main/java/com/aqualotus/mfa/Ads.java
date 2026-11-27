@@ -15,6 +15,7 @@ final class Ads {
     private final ConsentInformation consent;
     private final boolean debug;
     private boolean started;
+    private boolean adsInitialized;
     private boolean ready;
     private boolean loading;
     /** Earned by opting in on the guide dialog. Lasts until the process ends. */
@@ -30,24 +31,32 @@ final class Ads {
     }
 
     void start() {
-        if (started || !free.getAsBoolean()) return;
+        if (started) return;
         started = true;
-        consent.requestConsentInfoUpdate(activity, new ConsentRequestParameters.Builder().build(),
-            () -> {
-                if (alive()) UserMessagingPlatform.loadAndShowConsentFormIfRequired(activity, error -> initialize());
-            }, error -> initialize());
+        ConsentRequestParameters parameters = new ConsentRequestParameters.Builder().build();
+        consent.requestConsentInfoUpdate(activity, parameters, () -> {
+            if (alive()) UserMessagingPlatform.loadAndShowConsentFormIfRequired(activity, error -> loadIfAllowed());
+        }, error -> loadIfAllowed());
+        // Consent gathered last session can request ads before this update returns.
+        loadIfAllowed();
     }
 
     private boolean alive() { return !activity.isDestroyed() && !activity.isFinishing(); }
 
     private boolean allowed() { return alive() && free.getAsBoolean() && consent.canRequestAds(); }
 
-    private void initialize() {
-        if (!allowed()) return;
+    void loadIfAllowed() {
+        if (adsInitialized || !allowed()) return;
+        adsInitialized = true;
         MobileAds.initialize(activity, ignored -> activity.runOnUiThread(() -> {
             ready = true;
             preload();
         }));
+    }
+
+    boolean privacyOptionsRequired() {
+        return consent.getPrivacyOptionsRequirementStatus()
+            == ConsentInformation.PrivacyOptionsRequirementStatus.REQUIRED;
     }
 
     AdView banner(LinearLayout container, boolean transfer) {
@@ -99,6 +108,6 @@ final class Ads {
     }
 
     void privacyOptions() {
-        if (alive()) UserMessagingPlatform.showPrivacyOptionsForm(activity, error -> {});
+        if (alive() && privacyOptionsRequired()) UserMessagingPlatform.showPrivacyOptionsForm(activity, error -> {});
     }
 }
